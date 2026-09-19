@@ -1,23 +1,37 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
-// ReplayCache enforces single-use challenge nonces — the ANS-6 replay cache /
-// DPoP jti defense. A replayed request reuses a nonce we have already seen.
+// ReplayCache enforces single use of challenge nonces and quote IDs. Entries
+// outlive the longest valid quote, so nothing can be replayed while still fresh.
 type ReplayCache struct {
 	mu   sync.Mutex
-	seen map[string]bool
+	ttl  time.Duration
+	seen map[string]time.Time
 }
 
-func NewReplayCache() *ReplayCache { return &ReplayCache{seen: map[string]bool{}} }
+func NewReplayCache(ttl time.Duration) *ReplayCache {
+	return &ReplayCache{ttl: ttl, seen: map[string]time.Time{}}
+}
 
-// Use returns false if the nonce was already used (i.e. this is a replay).
-func (c *ReplayCache) Use(nonce string) bool {
+// Use returns false if the value was already used (a replay).
+func (c *ReplayCache) Use(v string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.seen[nonce] {
+	now := time.Now()
+	if exp, ok := c.seen[v]; ok && now.Before(exp) {
 		return false
 	}
-	c.seen[nonce] = true
+	if len(c.seen) > 10000 {
+		for k, exp := range c.seen {
+			if now.After(exp) {
+				delete(c.seen, k)
+			}
+		}
+	}
+	c.seen[v] = now.Add(c.ttl)
 	return true
 }

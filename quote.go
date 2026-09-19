@@ -2,30 +2,64 @@ package main
 
 import (
 	"crypto/x509"
-	"encoding/binary"
+	"encoding/json"
+	"time"
 )
 
-// Quote is a price the seller commits to. The seller SIGNS (amount || nonce)
-// so a man-in-the-middle cannot swap the amount without breaking the signature.
+// Signing contexts keep one kind of signature from being accepted as another:
+// a possession proof over bytes the buyer chose can never double as a quote.
+const (
+	popContext   = "agentvouch/pop/v1"
+	quoteContext = "agentvouch/quote/v1"
+	maxQuoteTTL  = 10 * time.Minute
+)
+
+// QuoteTerms is everything the seller commits to. The signature covers all of
+// it, so a quote is bound to one supplier, one buyer, one amount and a short
+// validity window, and its ID can be spent only once. PayTo is the bank
+// account to pay, which must match the one the seller attests in its signed card.
+type QuoteTerms struct {
+	QuoteID   string `json:"quoteId"`
+	Supplier  string `json:"supplier"`
+	Buyer     string `json:"buyer"`
+	AmountUSD int    `json:"amountUsd"`
+	PayTo     string `json:"payTo"`
+	ExpiresAt int64  `json:"expiresAt"`
+}
+
 type Quote struct {
-	AmountUSD int
-	Nonce     string
-	Sig       []byte
+	Terms QuoteTerms
+	Sig   []byte
 }
 
-func quoteBytes(amountUSD int, nonce string) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(amountUSD))
-	return append(b, []byte(nonce)...)
+func contextMessage(context string, payload []byte) []byte {
+	return append([]byte(context+"\x00"), payload...)
 }
 
-// IssueQuote has the seller sign the amount + nonce.
-func IssueQuote(seller Peer, amountUSD int, nonce string) Quote {
-	return Quote{AmountUSD: amountUSD, Nonce: nonce, Sig: seller.Sign(quoteBytes(amountUSD, nonce))}
+func (t QuoteTerms) signingBytes() []byte {
+	b, _ := json.Marshal(t)
+	return contextMessage(quoteContext, b)
 }
 
-// verifyQuote checks the seller's signature, under its ANS-certified key, over
-// the EXACT amount the buyer is about to pay.
-func verifyQuote(sellerCert *x509.Certificate, q Quote) bool {
-	return verifySig(sellerCert, quoteBytes(q.AmountUSD, q.Nonce), q.Sig)
+func popMessage(buyer, nonce string) []byte {
+	return contextMessage(popContext, []byte(buyer+"\x00"+nonce))
+}
+
+func newQuoteTerms(supplier, buyer string, amountUSD int, payTo string) QuoteTerms {
+	return QuoteTerms{
+		QuoteID:   "q-" + newNonce()[:16],
+		Supplier:  supplier,
+		Buyer:     buyer,
+		AmountUSD: amountUSD,
+		PayTo:     payTo,
+		ExpiresAt: time.Now().Add(5 * time.Minute).Unix(),
+	}
+}
+
+func IssueQuote(seller Peer, t QuoteTerms) Quote {
+	return Quote{Terms: t, Sig: seller.SignQuote(t)}
+}
+
+func verifyQuoteSig(sellerCert *x509.Certificate, q Quote) bool {
+	return verifySig(sellerCert, q.Terms.signingBytes(), q.Sig)
 }

@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/agentvouch serve -addr 127.0.0.1:8080 -host agentvouch.us
 DynamicUser=yes
-LoadCredential=identity.crt:/etc/agentvouch/identity.crt
-LoadCredential=identity.key:/etc/agentvouch/identity.key
+LoadCredential=av:/etc/agentvouch
+StateDirectory=agentvouch
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
