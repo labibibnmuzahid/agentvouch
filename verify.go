@@ -1,28 +1,26 @@
 package main
 
 import (
-	"bytes"
-	"crypto/ed25519"
+	"context"
 	"fmt"
+	"strings"
+
+	"github.com/agentnameservice/ans-sdk-go/verify"
 )
 
-// Peer is anything a buyer might transact with.
-type Peer interface {
-	Card() Card
-	Sign(msg []byte) []byte
-}
-
-// Evidence is what we SHOW the judge: each proof and its reason. Mirrors the
-// artifacts a real verifier surfaces (cert, TL receipt/badge, status token).
+// Evidence is what we SHOW the judge: each proof, its reason, and the
+// transparency-log record it was checked against.
 type Evidence struct {
-	FQDN       string `json:"fqdn"`
-	KeyID      string `json:"keyId"`
-	Identity   string `json:"identity"`
-	Liveness   string `json:"liveness"`
-	Possession string `json:"possession"`
-	Quote      string `json:"quote"`
-	OK         bool   `json:"ok"`
-	Reason     string `json:"reason,omitempty"`
+	FQDN          string       `json:"fqdn"`
+	Presented     string       `json:"presentedFingerprint"`
+	Identity      string       `json:"identity"`
+	Liveness      string       `json:"liveness"`
+	Authorization string       `json:"authorization"`
+	Possession    string       `json:"possession"`
+	Quote         string       `json:"quote"`
+	OK            bool         `json:"ok"`
+	Reason        string       `json:"reason,omitempty"`
+	ANS           *ANSEvidence `json:"ans,omitempty"`
 }
 
 func (e Evidence) Print() {
@@ -32,55 +30,79 @@ func (e Evidence) Print() {
 		}
 		return s
 	}
-	fmt.Printf("      evidence: identity[%s] liveness[%s] possession[%s] quote[%s]\n",
-		mark(e.Identity), mark(e.Liveness), mark(e.Possession), mark(e.Quote))
+	fmt.Printf("      evidence: identity[%s] liveness[%s] authz[%s] possession[%s] quote[%s]\n",
+		mark(e.Identity), mark(e.Liveness), mark(e.Authorization), mark(e.Possession), mark(e.Quote))
+	if a := e.ANS; a != nil {
+		fmt.Printf("      ans: %s  agent %s  TL leaf %d of %d\n", a.ANSName, a.AgentID, a.LeafIndex, a.TreeSize)
+	}
 }
 
-// Authenticate runs the buyer's checks BEFORE paying. It reproduces, in
-// miniature, ans.NewAgentClient(WithAgentClientFailurePolicy(verify.Strict)):
-// Identity (sealed?) + Liveness (ACTIVE?) + Possession (fresh signed challenge,
-// single-use) + Quote integrity (amount signed by the seller). Any failure
-// means refuse. "Never let discovery alone authorize an action."
-func Authenticate(reg *Registry, rc *ReplayCache, peer Peer, q Quote, challengeNonce string) Evidence {
-	card := peer.Card()
-	ev := Evidence{FQDN: card.FQDN, KeyID: keyID(card.Pub)}
+// Mandate is the buyer's authorization policy. ANS proves WHO a seller is;
+// only the mandate decides whether we may pay them.
+type Mandate struct{ Payees []string }
 
-	// PROOF 1 - IDENTITY: FQDN sealed in ANS, and the presented key is the one
-	// pinned for it. Blocks lookalike domains and copied/forged cards.
-	rec, err := reg.Resolve(card.FQDN)
-	if err != nil {
-		ev.Reason = "identity: " + err.Error()
+func (m Mandate) Allows(fqdn string) bool {
+	for _, p := range m.Payees {
+		if strings.EqualFold(p, fqdn) {
+			return true
+		}
+	}
+	return false
+}
+
+// Authenticate runs the buyer's checks BEFORE paying. Identity + Liveness come
+// from the live ANS transparency log via the ANS SDK; Authorization from the
+// buyer's mandate; Possession is a fresh single-use challenge signed with the
+// key ANS certified; Quote integrity is the amount signed with that same key.
+// Any failure means refuse. "Never let discovery alone authorize an action."
+func Authenticate(ctx context.Context, reg *Registry, rc *ReplayCache, m Mandate, peer Peer, q Quote, challengeNonce string) Evidence {
+	cert := peer.Cert()
+	fqdn := cert.Subject.CommonName
+	if len(cert.DNSNames) > 0 {
+		fqdn = cert.DNSNames[0]
+	}
+	ev := Evidence{FQDN: fqdn, Presented: fingerprint(cert)}
+
+	// PROOF 1 - IDENTITY: the presented certificate is the one the ANS
+	// transparency log sealed for this hostname and ANS name.
+	// PROOF 2 - LIVENESS: that registration is live (not revoked or expired).
+	out := reg.Resolve(ctx, cert)
+	ev.ANS = ansEvidence(out.Badge)
+	switch out.Type {
+	case verify.OutcomeVerified:
+	case verify.OutcomeInvalidStatus:
+		ev.Identity = "sealed:" + short(ev.ANS.SealedFingerprint, 12)
+		ev.Reason = "liveness: ANS registration for " + fqdn + " is " + string(out.Status)
+		return ev
+	default:
+		ev.Reason = "identity: " + identityFailure(out, fqdn)
 		return ev
 	}
-	if !bytes.Equal(card.Pub, rec.Pub) {
-		ev.Reason = "identity: presented key is not the key ANS pinned for " + card.FQDN
+	ev.Identity = "sealed:" + short(ev.ANS.SealedFingerprint, 12)
+	ev.Liveness = ev.ANS.Status
+
+	// AUTHORIZATION: a genuine, live identity is still not permission to pay.
+	if !m.Allows(fqdn) {
+		ev.Reason = "authorization: " + fqdn + " is a genuine ANS agent, but not a payee in the buyer's mandate"
 		return ev
 	}
-	ev.Identity = "sealed:" + keyID(rec.Pub)
+	ev.Authorization = "mandate:" + fqdn
 
-	// PROOF 2 - LIVENESS: registration ACTIVE right now (not revoked).
-	if rec.Status != Active {
-		ev.Reason = "liveness: registration is " + string(rec.Status)
-		return ev
-	}
-	ev.Liveness = string(rec.Status)
-
-	// PROOF 3 - POSSESSION: peer signs a FRESH, single-use challenge with the
-	// pinned key. Blocks forged signatures (bad sig) and replays (used nonce).
+	// PROOF 3 - POSSESSION: the peer signs a FRESH, single-use challenge with the
+	// key ANS certified. Blocks copied certificates and replays.
 	if !rc.Use(challengeNonce) {
 		ev.Reason = "possession: challenge nonce already used (replay)"
 		return ev
 	}
-	if !ed25519.Verify(rec.Pub, []byte(challengeNonce), peer.Sign([]byte(challengeNonce))) {
-		ev.Reason = "possession: proof-of-possession signature invalid (forged)"
+	if !verifySig(cert, []byte(challengeNonce), peer.Sign([]byte(challengeNonce))) {
+		ev.Reason = "possession: signature does not verify against the ANS-certified key (forged)"
 		return ev
 	}
-	ev.Possession = "fresh-pop:" + short(challengeNonce)
+	ev.Possession = "fresh-pop:" + short(challengeNonce, 8)
 
-	// QUOTE INTEGRITY: the amount about to be paid is signed by the seller.
-	// Blocks swapped quotes.
-	if !verifyQuote(rec.Pub, q) {
-		ev.Reason = fmt.Sprintf("quote: amount $%d not signed by %s (swapped)", q.AmountUSD, card.FQDN)
+	// QUOTE INTEGRITY: the amount about to be paid is signed with that key.
+	if !verifyQuote(cert, q) {
+		ev.Reason = fmt.Sprintf("quote: amount $%d not signed by %s (swapped)", q.AmountUSD, fqdn)
 		return ev
 	}
 	ev.Quote = fmt.Sprintf("signed:$%d", q.AmountUSD)
@@ -89,9 +111,9 @@ func Authenticate(reg *Registry, rc *ReplayCache, peer Peer, q Quote, challengeN
 	return ev
 }
 
-func short(s string) string {
-	if len(s) > 8 {
-		return s[:8]
+func short(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
 	}
 	return s
 }

@@ -1,10 +1,17 @@
 package main
 
 import (
-	"crypto/ed25519"
+	"context"
 	"crypto/rand"
 	"fmt"
+	"log"
 	"os"
+	"time"
+)
+
+const (
+	buyerFQDN = "buyer.acme-treasury.example"
+	fraudHost = "fraud.webmesh.ai"
 )
 
 func newNonce() string {
@@ -12,16 +19,6 @@ func newNonce() string {
 	rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
-
-// ForgedPeer presents the real supplier's card (copied public key) but cannot
-// sign for it - it holds a different private key.
-type ForgedPeer struct {
-	card Card
-	priv ed25519.PrivateKey
-}
-
-func (f ForgedPeer) Card() Card             { return f.card }
-func (f ForgedPeer) Sign(msg []byte) []byte { return ed25519.Sign(f.priv, msg) }
 
 type Scenario struct {
 	ID       string   `json:"id"`
@@ -40,17 +37,25 @@ type Report struct {
 }
 
 func main() {
+	supplier, err := loadSupplier()
+	if err != nil {
+		log.Fatal(err)
+	}
+	reg := NewRegistry()
+
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
-		serve(os.Args[2:])
+		serve(os.Args[2:], reg, supplier)
 		return
 	}
 
 	fmt.Println("AgentVouch - agents that verify who they pay, and refuse impostors")
-	fmt.Println("GoDaddy ANS (identity) . Capital One Nessie (payment) . auditable ledger (Peraton)")
-	fmt.Println("Threat model: lookalike domain . copied card . forged signature . replay . swapped quote")
+	fmt.Println("GoDaddy ANS (identity, live) . Capital One Nessie (payment) . auditable ledger (Peraton)")
+	fmt.Println("Threat model: lookalike/impostor cert . copied card . forged signature . replay . swapped quote . genuine-but-unauthorized payee")
 	fmt.Println("=================================================================================")
 
-	r := RunDemo()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r := RunDemo(ctx, reg, supplier)
 	for _, s := range r.Scenarios {
 		fmt.Printf("\n[%s] %s\n", s.ID, s.Title)
 		s.Evidence.Print()
@@ -61,65 +66,69 @@ func main() {
 		}
 	}
 
-	fmt.Println("\nAudit ledger (hash-chained transparency log):")
+	fmt.Println("\nAudit ledger (hash-chained):")
 	for i, e := range r.Ledger {
 		fmt.Printf("  #%d %-16s %s | %s | seal %s\n", i, e.Event, e.Time, e.Detail, e.Hash[:12])
 	}
 	fmt.Printf("\nLedger integrity: %v\n", r.LedgerOK)
 }
 
-// RunDemo plays the success path and the four attacks against a fresh registry.
-func RunDemo() Report {
-	reg := NewRegistry()
+// RunDemo plays the success path and the attacks, verifying every seller
+// against the live ANS transparency log.
+func RunDemo(ctx context.Context, reg *Registry, supplier *Agent) Report {
 	rc := NewReplayCache()
 	ledger := &Ledger{}
-
-	buyer := NewAgent("buyer.acme-treasury.example", "buyer")
-	supplier := NewAgent("supplier.parts-co.example", "supplier")
-	reg.Register(buyer)
-	reg.Register(supplier)
-	ledger.Append("ANS_REGISTER", "supplier.parts-co.example key "+keyID(supplier.Card().Pub))
+	host := supplier.Cert().DNSNames[0]
+	mandate := Mandate{Payees: []string{host}}
 
 	amt := 50000
 	var out []Scenario
 	run := func(id, expect, title string, seller Peer, q Quote, nonce string) {
-		s := settle(reg, rc, ledger, buyer, seller, q, nonce)
+		s := settle(ctx, reg, rc, mandate, ledger, seller, q, nonce)
 		s.ID, s.Expect, s.Title = id, expect, title
 		out = append(out, s)
 	}
 
 	nA := newNonce()
-	run("A", "pay", fmt.Sprintf("SUCCESS PATH - buyer pays the REAL supplier ($%d)", amt),
-		supplier, supplier.IssueQuote(amt, newNonce()), nA)
+	run("A", "pay", fmt.Sprintf("SUCCESS PATH - buyer pays the real ANS-registered supplier %s ($%d)", host, amt),
+		supplier, IssueQuote(supplier, amt, newNonce()), nA)
 
-	rogue := NewAgent("supplier.parts-co.example", "supplier")
-	run("B", "block", "REFUSAL - impostor reuses supplier.parts-co.example with its OWN key",
-		rogue, rogue.IssueQuote(amt, newNonce()), newNonce())
+	impostor := newImpostor(supplier.Cert())
+	run("B", "block", "REFUSAL - impostor presents its own certificate claiming "+host,
+		impostor, IssueQuote(impostor, amt, newNonce()), newNonce())
 
-	_, fakePriv, _ := ed25519.GenerateKey(rand.Reader)
-	run("C", "block", "REFUSAL - attacker copies the supplier's card but cannot sign for it",
-		ForgedPeer{card: supplier.Card(), priv: fakePriv}, supplier.IssueQuote(amt, newNonce()), newNonce())
+	run("C", "block", "REFUSAL - attacker copies "+host+"'s real ANS certificate but cannot sign for it",
+		newForgedPeer(supplier.Cert()), IssueQuote(supplier, amt, newNonce()), newNonce())
 
 	run("D", "block", "REFUSAL - attacker replays scenario A's challenge nonce",
-		supplier, supplier.IssueQuote(amt, newNonce()), nA)
+		supplier, IssueQuote(supplier, amt, newNonce()), nA)
 
-	qE := supplier.IssueQuote(amt, newNonce())
+	qE := IssueQuote(supplier, amt, newNonce())
 	qE.AmountUSD = amt * 10
 	run("E", "block", fmt.Sprintf("REFUSAL - man-in-the-middle swaps the quote to $%d after signing", amt*10),
 		supplier, qE, newNonce())
 
+	title := "REFUSAL - " + fraudHost + " is a real, live ANS agent, but not in the buyer's mandate"
+	if fraud, err := fetchTrustCardAgent(ctx, fraudHost); err != nil {
+		ev := Evidence{FQDN: fraudHost, Reason: "identity: could not fetch " + fraudHost + " trust card, failing closed: " + err.Error()}
+		ledger.Append("PAYMENT_BLOCKED", fraudHost+" - "+ev.Reason)
+		out = append(out, Scenario{ID: "F", Expect: "block", Title: title, Evidence: ev, Amount: amt})
+	} else {
+		run("F", "block", title, fraud, IssueQuote(fraud, amt, newNonce()), newNonce())
+	}
+
 	return Report{Scenarios: out, Ledger: ledger.Entries(), LedgerOK: ledger.Verify()}
 }
 
-func settle(reg *Registry, rc *ReplayCache, ledger *Ledger, buyer *Agent, seller Peer, q Quote, nonce string) Scenario {
-	ev := Authenticate(reg, rc, seller, q, nonce)
+func settle(ctx context.Context, reg *Registry, rc *ReplayCache, m Mandate, ledger *Ledger, seller Peer, q Quote, nonce string) Scenario {
+	ev := Authenticate(ctx, reg, rc, m, seller, q, nonce)
 	s := Scenario{Evidence: ev, Amount: q.AmountUSD}
 	if !ev.OK {
 		ledger.Append("PAYMENT_BLOCKED", ev.FQDN+" - "+ev.Reason)
 		return s
 	}
-	tx, _ := Transfer(buyer.FQDN, ev.FQDN, q.AmountUSD)
+	tx, _ := Transfer(buyerFQDN, ev.FQDN, q.AmountUSD)
 	s.Paid, s.Tx = true, tx
-	ledger.Append("PAYMENT_SENT", fmt.Sprintf("$%d to %s tx %s", q.AmountUSD, ev.FQDN, tx))
+	ledger.Append("PAYMENT_SENT", fmt.Sprintf("$%d to %s tx %s | ANS %s leaf %d", q.AmountUSD, ev.FQDN, tx, ev.ANS.ANSName, ev.ANS.LeafIndex))
 	return s
 }

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/binary"
 )
 
@@ -20,12 +20,12 @@ func quoteBytes(amountUSD int, nonce string) []byte {
 }
 
 // IssueQuote has the seller sign the amount + nonce.
-func (a *Agent) IssueQuote(amountUSD int, nonce string) Quote {
-	return Quote{AmountUSD: amountUSD, Nonce: nonce, Sig: a.Sign(quoteBytes(amountUSD, nonce))}
+func IssueQuote(seller Peer, amountUSD int, nonce string) Quote {
+	return Quote{AmountUSD: amountUSD, Nonce: nonce, Sig: seller.Sign(quoteBytes(amountUSD, nonce))}
 }
 
-// verifyQuote checks the seller's signature over the EXACT amount the buyer is
-// about to pay. Returns false if the amount was altered after signing.
-func verifyQuote(sellerKey ed25519.PublicKey, q Quote) bool {
-	return ed25519.Verify(sellerKey, quoteBytes(q.AmountUSD, q.Nonce), q.Sig)
+// verifyQuote checks the seller's signature, under its ANS-certified key, over
+// the EXACT amount the buyer is about to pay.
+func verifyQuote(sellerCert *x509.Certificate, q Quote) bool {
+	return verifySig(sellerCert, quoteBytes(q.AmountUSD, q.Nonce), q.Sig)
 }

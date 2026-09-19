@@ -47,6 +47,12 @@
   .pass .v { color: var(--ok); }
   .fail .v { color: var(--bad); font-weight: 700; }
   .skip .v { color: var(--muted); }
+  .ans { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 12px 0 0; font-size: 12px; }
+  .ans dt { color: var(--muted); }
+  .ans dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+  .ans a { color: var(--accent); }
+  .mono { font-family: var(--mono); }
+  .bad { color: var(--bad); }
   .reason { margin: 12px 0 0; font-size: 13px; color: var(--bad); }
   .tx { margin: 12px 0 0; font-size: 13px; color: var(--ok); font-family: var(--mono); }
   .table-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
@@ -66,13 +72,13 @@
   <header>
     <div>
       <h1>AgentVouch</h1>
-      <p class="tag">Agents that verify who they pay, and refuse impostors. Discover → Resolve → Verify → Connect.</p>
+      <p class="tag">Agents that verify who they pay, and refuse impostors. Every seller is checked live against the GoDaddy ANS transparency log: Discover → Resolve → Verify → Connect.</p>
     </div>
     <button id="run" type="button">Run verification</button>
   </header>
 
   <div class="threats" aria-label="Threat model">
-    <span>Lookalike domain</span><span>Copied card</span><span>Forged signature</span><span>Replay</span><span>Swapped quote</span>
+    <span>Impostor certificate</span><span>Copied certificate</span><span>Forged signature</span><span>Replay</span><span>Swapped quote</span><span>Genuine but unauthorized payee</span>
   </div>
   <p class="summary" id="summary">Running…</p>
 
@@ -89,12 +95,12 @@
   <p class="integrity" id="integrity"></p>
 
   <footer>
-    Identity via GoDaddy ANS · payment via Capital One Nessie · tamper-evident ledger.
+    Identity and liveness verified live via the GoDaddy ANS SDK (DNS <code>_ans-badge</code> → transparency log) · payment via Capital One Nessie · tamper-evident ledger.
     Agent card: <a href="/.well-known/agent-card.json">/.well-known/agent-card.json</a> · MCP: <code>POST /mcp</code>
   </footer>
 </main>
 <script>
-const PROOFS = [["identity", "Identity"], ["liveness", "Liveness"], ["possession", "Possession"], ["quote", "Quote integrity"]];
+const PROOFS = [["identity", "Identity (ANS)"], ["liveness", "Liveness (ANS)"], ["authorization", "Authorization"], ["possession", "Possession"], ["quote", "Quote integrity"]];
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -121,6 +127,19 @@ function card(s) {
     list.append(li);
   }
   c.append(list);
+  const a = s.evidence.ans;
+  if (a) {
+    const dl = el("dl", "ans");
+    const row = (k, v) => { dl.append(el("dt", "", k)); const dd = el("dd"); dd.append(v); dl.append(dd); };
+    row("ANS name", el("span", "mono", a.ansName));
+    const link = el("a", "mono", "leaf " + a.leafIndex.toLocaleString() + " of " + a.treeSize.toLocaleString());
+    link.href = a.badgeUrl; link.target = "_blank"; link.rel = "noopener";
+    row("Transparency log", link);
+    row("Sealed cert", el("span", "mono", "SHA256:" + a.sealedFingerprint.slice(0, 16) + "…"));
+    if (s.evidence.presentedFingerprint && s.evidence.presentedFingerprint !== a.sealedFingerprint)
+      row("Presented cert", el("span", "mono bad", "SHA256:" + s.evidence.presentedFingerprint.slice(0, 16) + "…"));
+    c.append(dl);
+  }
   c.append(s.paid ? el("p", "tx", "paid $" + s.amount.toLocaleString() + " · tx " + s.tx)
                   : el("p", "reason", s.evidence.reason + " — no money moved."));
   return c;

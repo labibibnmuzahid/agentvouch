@@ -20,9 +20,11 @@ ID_FILE=.ans-agent-id
 
 case "${1:-}" in
 csr)
+  [ -e certs/server.key ] && { echo "certs/server.key exists and backs the issued ANS cert; refusing to overwrite" >&2; exit 1; }
   ans-cli generate-csr --host "$ANS_DOMAIN" --org "$ORG" --version "$VERSION" --out-dir ./certs
   ;;
 register)
+  [ -s "$ID_FILE" ] && { echo "already registered as $(cat "$ID_FILE"); run ./register.sh verify" >&2; exit 1; }
   ans-cli register \
     --name "AgentVouch" \
     --description "Buyer-side payment agent that verifies seller identity via ANS before paying" \
@@ -33,15 +35,15 @@ register)
     --metadata-url "https://$ANS_DOMAIN/.well-known/agent-card.json" \
     --function "run_scenarios:Verify-then-pay scenarios:ANS,verification,payments" \
     --json | tee register.out.json
-  python3 -c "import json;print(json.load(open('register.out.json'))['agentId'])" > "$ID_FILE"
+  python3 -c "import json;d=json.load(open('register.out.json'));print(next(l['href'] for l in d['links'] if l['rel']=='self').rsplit('/',1)[1])" > "$ID_FILE"
   echo "agentId -> $(cat "$ID_FILE")   (place the DNS TXT records above, then: ./register.sh verify)"
   ;;
 verify)
   AGENT_ID="$(cat "$ID_FILE")"
+  ans-cli verify-acme "$AGENT_ID" || true
   ans-cli verify-dns "$AGENT_ID" || true
-  ans-cli verify-acme "$AGENT_ID"
   for _ in $(seq 1 30); do
-    STATUS="$(ans-cli status "$AGENT_ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["lifecycle"]["status"])')"
+    STATUS="$(ans-cli status "$AGENT_ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["agentStatus"]["status"])')"
     echo "status: $STATUS"
     [ "$STATUS" = "ACTIVE" ] && break
     sleep 10

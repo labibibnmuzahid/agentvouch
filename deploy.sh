@@ -6,9 +6,12 @@ cd "$(dirname "$0")"
 HOST="${DEPLOY_HOST:-root@64.177.45.57}"
 
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o bin/agentvouch .
+ssh "$HOST" 'install -d -m 0700 /etc/agentvouch'
+scp -q certs/identity.crt certs/identity.key "$HOST:/etc/agentvouch/"
 scp -q bin/agentvouch deploy/agentvouch.service deploy/Caddyfile "$HOST:/tmp/"
 ssh "$HOST" bash -s <<'REMOTE'
 set -euo pipefail
+chmod 0600 /etc/agentvouch/identity.key /etc/agentvouch/identity.crt
 command -v caddy >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy; }
 install -m 0755 /tmp/agentvouch /usr/local/bin/agentvouch
 install -m 0644 /tmp/agentvouch.service /etc/systemd/system/agentvouch.service

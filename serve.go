@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -12,7 +13,7 @@ import (
 //go:embed web/index.html
 var webFS embed.FS
 
-func serve(args []string) {
+func serve(args []string, reg *Registry, supplier *Agent) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
 	host := fs.String("host", "agentvouch.us", "public hostname advertised in the agent card")
@@ -25,12 +26,18 @@ func serve(args []string) {
 		w.Write(page)
 	})
 	mux.HandleFunc("GET /api/run", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, RunDemo())
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		writeJSON(w, http.StatusOK, RunDemo(ctx, reg, supplier))
 	})
 	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, agentCard(*host))
 	})
-	mux.HandleFunc("POST /mcp", handleMCP)
+	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		handleMCP(w, r, func() Report { return RunDemo(ctx, reg, supplier) })
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 
 	srv := &http.Server{
@@ -38,7 +45,7 @@ func serve(args []string) {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 	log.Printf("AgentVouch serving %s on %s", *host, *addr)
 	log.Fatal(srv.ListenAndServe())
@@ -72,7 +79,7 @@ func agentCard(host string) map[string]any {
 		"skills": []map[string]any{{
 			"id":          "run_scenarios",
 			"name":        "Verify-then-pay scenarios",
-			"description": "Runs the success path and four attacks (lookalike key, forged signature, replay, swapped quote) and returns the evidence and the hash-chained audit ledger.",
+			"description": "Verifies sellers against the live GoDaddy ANS transparency log: one legitimate payment and five blocked attacks (impostor certificate, copied certificate, replay, swapped quote, genuine-but-unauthorized payee), with evidence and the hash-chained audit ledger.",
 			"tags":        []string{"ANS", "verification", "payments"},
 		}},
 	}
@@ -89,7 +96,7 @@ type rpcRequest struct {
 }
 
 // handleMCP is a minimal streamable-HTTP MCP server with a single tool.
-func handleMCP(w http.ResponseWriter, r *http.Request) {
+func handleMCP(w http.ResponseWriter, r *http.Request, run func() Report) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req rpcRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,7 +121,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		result = map[string]any{"tools": []map[string]any{{
 			"name":        "run_scenarios",
-			"description": "Run AgentVouch's verify-then-pay scenarios: one legitimate payment and four blocked attacks, with evidence and the audit ledger.",
+			"description": "Run AgentVouch's verify-then-pay scenarios against live ANS: one legitimate payment and five blocked attacks, with evidence and the audit ledger.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		}}}
 	case "tools/call":
@@ -122,7 +129,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, rpcError(req.ID, -32602, "unknown tool: "+req.Params.Name))
 			return
 		}
-		body, _ := json.Marshal(RunDemo())
+		body, _ := json.Marshal(run())
 		result = map[string]any{"content": []map[string]any{{"type": "text", "text": string(body)}}, "isError": false}
 	default:
 		writeJSON(w, http.StatusOK, rpcError(req.ID, -32601, "method not found: "+req.Method))
