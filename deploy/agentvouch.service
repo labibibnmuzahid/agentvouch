@@ -1,0 +1,15 @@
+[Unit]
+Description=AgentVouch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/agentvouch serve -addr 127.0.0.1:8080 -host agentvouch.us
+DynamicUser=yes
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

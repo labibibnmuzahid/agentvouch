@@ -1,0 +1,15 @@
+/certs/
+*.pem
+*.key
+*.csr
+.env
+.ans-agent-id
+register.out.json
+node_modules/
+/bin/
+/dist/
+
+# private notes and tooling config
+CLAUDE.md
+SETUP.md
+.claude/
