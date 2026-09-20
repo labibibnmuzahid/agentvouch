@@ -16,6 +16,5 @@ SETUP.md
 /state/
 /agentvouch
 
-# submission copy and generated deck (not part of the build)
-SUBMISSION.md
-presentation.pptx
+# submission pack (pitch, Devpost copy, deck) - not part of the build
+/submission/
