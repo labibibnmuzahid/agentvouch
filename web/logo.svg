@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="AgentVouch">
+  <title>AgentVouch</title>
+  <!-- Transparency-log ring: twelve sealed leaves around the identity. -->
+  <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.35">
+    <path d="M16 1.6v2.2M23.2 3.5l-1.1 1.9M28.5 8.8l-1.9 1.1M30.4 16h-2.2M28.5 23.2l-1.9-1.1M23.2 28.5l-1.1-1.9M16 30.4v-2.2M8.8 28.5l1.1-1.9M3.5 23.2l1.9-1.1M1.6 16h2.2M3.5 8.8l1.9 1.1M8.8 3.5l1.1 1.9"/>
+  </g>
+  <!-- Sealed identity: the shield the certificate is bound to. -->
+  <path d="M16 6.2l7.4 2.7v5.6c0 4.7-3.1 8.2-7.4 9.7-4.3-1.5-7.4-5-7.4-9.7V8.9z"
+        fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Verified: the check that only a held key can earn. -->
+  <path d="M12.4 15.5l2.7 2.7 5-5.4" fill="none" stroke="currentColor" stroke-width="2.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

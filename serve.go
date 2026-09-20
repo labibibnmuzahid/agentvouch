@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-//go:embed web/index.html web/app.css web/app.js
+//go:embed web/index.html web/app.css web/app.js web/logo.svg
 var webFS embed.FS
 
 const mcpProtocolVersion = "2025-03-26"
@@ -137,6 +137,7 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 	for _, asset := range []struct{ path, file, mime string }{
 		{"GET /app.css", "web/app.css", "text/css; charset=utf-8"},
 		{"GET /app.js", "web/app.js", "text/javascript; charset=utf-8"},
+		{"GET /logo.svg", "web/logo.svg", "image/svg+xml"},
 	} {
 		body, _ := webFS.ReadFile(asset.file)
 		mime := asset.mime

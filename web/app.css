@@ -188,7 +188,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.frame-host .lock { color: var(--ok); flex: none; }
+.frame-host .fav { flex: none; color: var(--accent); }
 
 .icon-btn {
   flex: none;
@@ -239,6 +239,17 @@ body {
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+.brand { display: flex; align-items: center; gap: var(--sp-3); }
+.brand .logo {
+  flex: none;
+  color: var(--accent);
+  animation: seal var(--slow) var(--ease) both;
+}
+@keyframes seal {
+  from { opacity: 0; transform: scale(0.82) rotate(-8deg); }
+  to { opacity: 1; transform: none; }
 }
 
 h1 {
@@ -737,6 +748,7 @@ footer .links { margin-top: var(--sp-2); display: flex; flex-wrap: wrap; gap: va
 }
 
 @media (max-width: 520px) {
+  .brand .logo { width: 38px; height: 38px; }
   body { padding: 0 0 var(--sp-5); background-image: none; }
   .frame { border-radius: 0; border-left: 0; border-right: 0; box-shadow: none; }
   .frame-bar { padding: var(--sp-3) var(--sp-4); }

@@ -53,3 +53,21 @@ func TestGeminiToolLoop(t *testing.T) {
 		t.Fatalf("model turn or tool result not sent back: %s", second)
 	}
 }
+
+func TestPlainTextStripsMarkdown(t *testing.T) {
+	in := "**Blocked.** The agent `fraud.webmesh.ai` is *genuine*:\n" +
+		"* ANS name: __ans://v1.0.3.fraud.webmesh.ai__\n" +
+		"  - status: ACTIVE\n" +
+		"## Verdict\nNot a payee in the mandate."
+	got := plainText(in)
+	for _, bad := range []string{"**", "__", "`", "#", "* ", "- "} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("%q survived: %q", bad, got)
+		}
+	}
+	for _, want := range []string{"Blocked.", "fraud.webmesh.ai", "• ANS name", "Verdict", "Not a payee"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("lost %q from the answer: %q", want, got)
+		}
+	}
+}

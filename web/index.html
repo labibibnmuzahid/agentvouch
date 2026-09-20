@@ -6,12 +6,14 @@
 <title>AgentVouch</title>
 <meta name="description" content="Agents that verify who they pay, and refuse impostors.">
 <link rel="stylesheet" href="/app.css">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<meta name="theme-color" content="#11151c">
 </head>
 <body>
 <div class="frame">
   <div class="frame-bar">
     <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
-    <div class="frame-host"><span class="lock" aria-hidden="true">&#9679;</span><span id="frame-host">agentvouch.us</span></div>
+    <div class="frame-host"><img class="fav" src="/logo.svg" alt="" width="15" height="15"><span id="frame-host">agentvouch.us</span></div>
     <button class="icon-btn" id="theme" type="button" aria-label="Switch between light and dark">&#9788;</button>
   </div>
 
@@ -19,7 +21,10 @@
     <header class="hero">
       <div>
         <p class="eyebrow"><span class="pulse" aria-hidden="true"></span>Live against GoDaddy ANS</p>
-        <h1>AgentVouch <span class="dim">verifies who it pays</span></h1>
+        <div class="brand">
+          <img class="logo" src="/logo.svg" alt="" width="52" height="52">
+          <h1>AgentVouch <span class="dim">verifies who it pays</span></h1>
+        </div>
         <p class="tag">A buyer-side payment agent that checks a seller's sealed identity, liveness, key possession and signed quote against the ANS transparency log &mdash; <em>before</em> any money moves &mdash; and refuses impostors.</p>
         <p class="flow">
           <b>Discover</b><span class="sep">&rarr;</span><b>Resolve</b><span class="sep">&rarr;</span><b>Verify</b><span class="sep">&rarr;</span><b>Connect</b>
