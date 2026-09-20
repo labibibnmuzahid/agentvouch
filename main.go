@@ -92,17 +92,28 @@ type Report struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "nessie-setup" || os.Args[1] == "mongo-check") {
+	if len(os.Args) > 1 {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		run := nessieSetup
-		if os.Args[1] == "mongo-check" {
+		var run func(context.Context) error
+		switch os.Args[1] {
+		case "nessie-setup":
+			run = nessieSetup
+		case "mongo-check":
 			run = mongoCheck
+		case "dnsid-key":
+			run = func(context.Context) error { return newOperatorKey() }
+		case "dns-records":
+			run = func(context.Context) error { return dnsRecords() }
 		}
-		if err := run(ctx); err != nil {
-			log.Fatal(err)
+		if run != nil {
+			if err := run(ctx); err != nil {
+				log.Fatal(err)
+			}
+			cancel()
+			return
 		}
-		return
+		cancel()
 	}
 	fleet, err := loadFleet()
 	if err != nil {

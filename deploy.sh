@@ -16,6 +16,18 @@ for name in buyer supplier; do
   fi
 done
 [ -f certs/solana-devnet.json ] && scp -q certs/solana-devnet.json "$HOST:/etc/agentvouch/solana.json"
+[ -f certs/dnsid.key ] && scp -q certs/dnsid.key "$HOST:/etc/agentvouch/dnsid.key"
+# The public ANS agent ids, so the deployed server can publish its agent index.
+python3 - <<'IDS' > /tmp/agent-ids.json
+import json, pathlib
+ids = {"agentvouch.us": pathlib.Path(".ans-agent-id").read_text().strip()}
+for h in ("buyer.agentvouch.us", "supplier.agentvouch.us"):
+    p = pathlib.Path("certs") / h / "agent-id"
+    if p.exists():
+        ids[h] = p.read_text().strip()
+print(json.dumps(ids))
+IDS
+scp -q /tmp/agent-ids.json "$HOST:/etc/agentvouch/agent-ids.json"
 # env_value reads one secret out of .env, tolerating CRLF and a key pasted twice.
 env_value() { grep -E "^$1=" .env 2>/dev/null | head -1 | sed -E "s/^($1=)+//" | tr -d '\r\n'; }
 ship_secret() {

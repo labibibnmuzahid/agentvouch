@@ -163,6 +163,27 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 		writeJSON(w, http.StatusOK, map[string]any{"keys": []any{publicJWK(s.personaFor(r).agent.Cert())}})
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	// DNS-AID: the documents the _dnsid TXT record points at, plus the
+	// organization index that lists every agent we run.
+	if key := loadOperatorKey(); key != nil {
+		jwks := operatorJWKS(key)
+		mux.HandleFunc("GET /.well-known/dnsid/op-keys.json", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, jwks)
+		})
+		mux.HandleFunc("GET /.well-known/dnsid/status.json", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "ACTIVE"})
+		})
+	} else {
+		log.Printf("dns-aid: no operator key, _dnsid documents are not served")
+	}
+	if ids, err := fleetHosts(); err == nil {
+		index := agentsIndex(ids)
+		mux.HandleFunc("GET /.well-known/agents-index.json", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, index)
+		})
+	} else {
+		log.Printf("dns-aid: no agent index (%v)", err)
+	}
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -369,6 +390,7 @@ func (s *server) agentCard(ctx context.Context, p persona) map[string]any {
 		"provider":        map[string]any{"organization": "AgentVouch", "url": base},
 		"supportedInterfaces": []map[string]any{
 			{"url": base, "protocolBinding": "jsonrpc", "protocolVersion": "1.0"},
+			{"url": base + "/mcp", "protocolBinding": "MCP", "protocolVersion": mcpProtocolVersion, "transport": "streamable-http"},
 		},
 		"capabilities": map[string]any{
 			"streaming":         false,
@@ -430,14 +452,25 @@ func (s *server) signedAgentCard(ctx context.Context, p persona) map[string]any 
 func (s *server) supplierCard(ctx context.Context, p persona) map[string]any {
 	base := "https://" + p.host
 	card := map[string]any{
-		"name":                "AgentVouch Demo Supplier",
-		"description":         "Demo parts supplier for AgentVouch. Signs single-use quotes bound to one buyer, one amount and a short expiry with its ANS identity key; buyers verify it through GoDaddy ANS before paying.",
-		"url":                 base,
-		"version":             "1.0.0",
-		"protocolVersion":     "1.0",
-		"provider":            map[string]any{"organization": "AgentVouch", "url": "https://" + s.host},
-		"supportedInterfaces": []map[string]any{{"url": base, "protocolBinding": "jsonrpc", "protocolVersion": "1.0"}},
-		"capabilities":        map[string]any{"streaming": false, "pushNotifications": false},
+		"name":            "AgentVouch Demo Supplier",
+		"description":     "Demo parts supplier for AgentVouch. Signs single-use quotes bound to one buyer, one amount and a short expiry with its ANS identity key; buyers verify it through GoDaddy ANS before paying.",
+		"url":             base,
+		"version":         "1.0.0",
+		"protocolVersion": "1.0",
+		"provider":        map[string]any{"organization": "AgentVouch", "url": "https://" + s.host},
+		"supportedInterfaces": []map[string]any{
+			{"url": base, "protocolBinding": "jsonrpc", "protocolVersion": "1.0"},
+			{"url": base + "/mcp", "protocolBinding": "MCP", "protocolVersion": mcpProtocolVersion, "transport": "streamable-http"},
+		},
+		"capabilities": map[string]any{
+			"streaming":         false,
+			"pushNotifications": false,
+			"extensions": []map[string]any{{
+				"uri":         "https://modelcontextprotocol.io",
+				"description": "MCP server with the vouch and run_scenarios tools.",
+				"params":      map[string]any{"endpoint": base + "/mcp", "transport": "streamable-http", "protocolVersion": mcpProtocolVersion},
+			}},
+		},
 		"securitySchemes": map[string]any{
 			"noAuth": map[string]any{"type": "noAuth", "description": "Public, read-only description endpoint. Rate limited per client."},
 		},
@@ -460,12 +493,29 @@ func (s *server) supplierCard(ctx context.Context, p persona) map[string]any {
 }
 
 func (s *server) addIdentity(ctx context.Context, p persona, card map[string]any) {
-	if a := s.ansInfo(ctx, p); a != nil {
-		card["x-identity"] = map[string]any{"ans": map[string]any{
-			"uri":             a.ANSName,
-			"trustCard":       "https://" + p.host + "/.well-known/ans/trust-card.json",
-			"transparencyLog": a.BadgeURL,
-		}}
+	card["x-security-note"] = "Reading is public and unauthenticated (noAuth): vouching, the scenarios and this card need no credential, and none of them move money. What is enforced is on the paying side: AgentVouch pays only a payee in its mandate, whose ANS-sealed identity certificate answered a fresh possession challenge, against a single-use quote signed by that same key, to an account attested in this signed card. The card is signed with the ANS identity key itself, so its signature ties it to the transparency log rather than to a key published beside it."
+	a := s.ansInfo(ctx, p)
+	if a == nil {
+		return
+	}
+	card["x-identity"] = map[string]any{"ans": map[string]any{
+		"uri":             a.ANSName,
+		"trustCard":       "https://" + p.host + "/.well-known/ans/trust-card.json",
+		"transparencyLog": a.BadgeURL,
+	}}
+	card["x-discovery"] = map[string]any{
+		"ans_registered": "prod",
+		"ans_name":       a.ANSName,
+		"tl_badge":       a.BadgeURL,
+		"trust_index": map[string]any{
+			"score_url":   "https://api.godaddy.com/v1/ans/registered-agents?query=" + p.host,
+			"score_field": "scores.trustScore",
+			"auth":        "sso-key",
+			"note":        "Advisory only. AgentVouch never authorizes a payment by score.",
+		},
+		"dns_aid_svcb": p.host + " IN SVCB 1 . alpn=a2a,h2",
+		"dns_aid_txt":  "_dnsid." + p.host,
+		"agents_index": "https://" + s.host + "/.well-known/agents-index.json",
 	}
 }
 
