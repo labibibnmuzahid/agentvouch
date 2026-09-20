@@ -397,7 +397,7 @@ func (s *server) agentCard(ctx context.Context, p persona) map[string]any {
 			"pushNotifications": false,
 			"extensions": []map[string]any{{
 				"uri":         "https://modelcontextprotocol.io",
-				"description": "MCP server with the vouch and run_scenarios tools.",
+				"description": "MCP server with the vouch, verify_quote and run_scenarios tools.",
 				"params":      map[string]any{"endpoint": base + "/mcp", "transport": "streamable-http", "protocolVersion": mcpProtocolVersion},
 			}},
 		},
@@ -414,6 +414,13 @@ func (s *server) agentCard(ctx context.Context, p persona) map[string]any {
 				"description": "Given a hostname, fetches the agent's ANS trust card and verifies its identity certificate against the GoDaddy ANS transparency log (sealed fingerprint, hostname, ANS name, liveness), plus its advisory Trust Index score.",
 				"tags":        []string{"ANS", "verification", "trust"},
 				"examples":    []string{"vouch for supplier.webmesh.ai", "is rogue-supplier.webmesh.ai who it claims to be?"},
+			},
+			{
+				"id":          "verify_quote",
+				"name":        "Verify a quote before paying",
+				"description": "Given a quote another agent presents, runs every check AgentVouch runs before paying - ANS identity and liveness of the signer, the signature over the terms, expiry, audience, mandate, and whether payTo matches the account the signer attests in its signed card - and reports what it found. Pays nothing.",
+				"tags":        []string{"ANS", "quote", "verification"},
+				"examples":    []string{"verify this quote from supplier.agentvouch.us"},
 			},
 			{
 				"id":          "run_scenarios",
@@ -467,12 +474,12 @@ func (s *server) supplierCard(ctx context.Context, p persona) map[string]any {
 			"pushNotifications": false,
 			"extensions": []map[string]any{{
 				"uri":         "https://modelcontextprotocol.io",
-				"description": "MCP server with the vouch and run_scenarios tools.",
+				"description": "MCP server with the issue_quote tool.",
 				"params":      map[string]any{"endpoint": base + "/mcp", "transport": "streamable-http", "protocolVersion": mcpProtocolVersion},
 			}},
 		},
 		"securitySchemes": map[string]any{
-			"noAuth": map[string]any{"type": "noAuth", "description": "Public, read-only description endpoint. Rate limited per client."},
+			"noAuth": map[string]any{"type": "noAuth", "description": "Public: anyone may ask for a quote. A quote is an offer bound to one buyer, amount and expiry, payable only to this supplier's attested account, so issuing one moves no money."},
 		},
 		"securityRequirements": []map[string]any{{"noAuth": []string{}}},
 		"defaultInputModes":    []string{"text/plain"},
@@ -480,8 +487,9 @@ func (s *server) supplierCard(ctx context.Context, p persona) map[string]any {
 		"skills": []map[string]any{{
 			"id":          "issue_quote",
 			"name":        "Issue signed quote",
-			"description": "Signs quotes over quote ID, supplier, buyer, amount and expiry with the ANS-certified key, inside AgentVouch's verify-then-pay flow.",
-			"tags":        []string{"quote", "payments"},
+			"description": "Signs a single-use quote over quote ID, supplier, buyer, amount, payTo and expiry with this agent's ANS-certified key. Callable as the issue_quote MCP tool; hand the result to verify_quote at https://" + buyerHost + "/mcp to watch every check run.",
+			"tags":        []string{"quote", "payments", "ANS"},
+			"examples":    []string{"issue a $2500 quote for buyer.agentvouch.us"},
 		}},
 	}
 	if _, simulated := s.rail.(simulatedRail); !simulated {
@@ -698,7 +706,10 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		Params struct {
 			Name      string `json:"name"`
 			Arguments struct {
-				Host string `json:"host"`
+				Host      string          `json:"host"`
+				Buyer     string          `json:"buyer"`
+				AmountUSD int             `json:"amountUsd"`
+				Quote     json.RawMessage `json:"quote"`
 			} `json:"arguments"`
 		} `json:"params"`
 	}
@@ -711,40 +722,35 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p := s.personaFor(r)
 	var result any
 	switch req.Method {
 	case "initialize":
 		result = map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "agentvouch", "version": "1.0.0"},
+			"serverInfo":      map[string]any{"name": p.host, "version": "1.0.0"},
 		}
 	case "ping":
 		result = map[string]any{}
 	case "tools/list":
-		result = map[string]any{"tools": []map[string]any{
-			{
-				"name":        "vouch",
-				"description": "Verify an agent by hostname against the GoDaddy ANS transparency log: sealed identity certificate, hostname, ANS name, liveness, and advisory Trust Index score.",
-				"inputSchema": map[string]any{"type": "object", "required": []string{"host"}, "properties": map[string]any{
-					"host": map[string]any{"type": "string", "description": "agent hostname, e.g. supplier.webmesh.ai"},
-				}},
-			},
-			{
-				"name":        "run_scenarios",
-				"description": "Run AgentVouch's verify-then-pay scenarios against live ANS: one legitimate payment and eight blocked attacks, with evidence and the audit ledger.",
-				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
-			},
-		}}
+		result = map[string]any{"tools": s.mcpTools(p)}
 	case "tools/call":
 		var out any
-		switch req.Params.Name {
-		case "vouch":
-			out = s.vouch(r.Context(), req.Params.Arguments.Host)
-		case "run_scenarios":
+		args := req.Params.Arguments
+		switch {
+		case req.Params.Name == "issue_quote" && p.supplier:
+			out = s.issueQuote(p, args.Buyer, args.AmountUSD)
+		case req.Params.Name == "vouch" && !p.supplier:
+			out = s.vouch(r.Context(), args.Host)
+		case req.Params.Name == "verify_quote" && !p.supplier:
+			out = s.verifyQuoteReport(r.Context(), args.Quote)
+		case req.Params.Name == "run_scenarios" && !p.supplier:
 			out = s.run(r.Context())
 		default:
-			writeJSON(w, http.StatusOK, rpcError(req.ID, -32602, "unknown tool: "+req.Params.Name))
+			// Each agent answers only for the skills its own card advertises.
+			writeJSON(w, http.StatusOK, rpcError(req.ID, -32602,
+				p.host+" has no tool "+req.Params.Name+"; it offers "+strings.Join(toolNames(s.mcpTools(p)), ", ")))
 			return
 		}
 		body, _ := json.Marshal(out)
@@ -841,4 +847,12 @@ func (l *limiter) allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+func toolNames(tools []map[string]any) []string {
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, fmt.Sprint(t["name"]))
+	}
+	return out
 }
