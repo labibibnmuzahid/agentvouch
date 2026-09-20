@@ -107,6 +107,18 @@ Nessie's own transaction records. Without a key, payments are clearly labelled `
   `n-1` with the memo in the transaction linked on the dashboard (or in `anchors`).
   Rewriting any past entry changes every later seal, and the on-chain memo can't be
   changed. Anchoring runs in the background and never delays a payment decision.
+- **Replicated to MongoDB Atlas:** the same chain is mirrored into Atlas with
+  `$setOnInsert`, so a seal that has been replicated is never rewritten, and the server
+  re-verifies the replica by recomputing every seal straight out of the database
+  (`atlas.intact` in `GET /api/ledger`). Atlas also holds what the flat file cannot
+  answer questions about: one document per decision with the evidence that decided it,
+  and one per agent with every ANS observation - status, sealed certificate fingerprint
+  and advisory Trust Index over time - so a changed certificate shows up as drift rather
+  than a silent overwrite. Ask AgentVouch "has supplier.agentvouch.us changed?" and the
+  `agent_history` tool answers from Atlas. Every write is queued and asynchronous: if
+  Atlas is unreachable, decisions and payments are unaffected and the replica catches up
+  when it returns. Documents are tagged with the chain's genesis seal, so several
+  deployments can share one database without colliding.
 
 ## Run
 Needs the agents' ANS identity certificates and keys (never committed): `certs/identity.{crt,key}`,
@@ -117,6 +129,7 @@ go run .           # terminal demo
 go run . serve     # dashboard, JSON API (/api/run, /api/vouch), A2A (/), MCP (/mcp)
 go test ./...      # offline tests: signatures, quote binding, replay, host validation, ledger tampering
 SOLANA_SIM=1 go test -run Solana ./...   # simulate the anchor transaction against devnet
+go run . mongo-check                     # MONGODB_URI: connection, replica size, integrity, top refusals
 ```
 
 ## Tradeoff

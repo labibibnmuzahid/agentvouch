@@ -92,10 +92,14 @@ type Report struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "nessie-setup" {
+	if len(os.Args) > 1 && (os.Args[1] == "nessie-setup" || os.Args[1] == "mongo-check") {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		if err := nessieSetup(ctx); err != nil {
+		run := nessieSetup
+		if os.Args[1] == "mongo-check" {
+			run = mongoCheck
+		}
+		if err := run(ctx); err != nil {
 			log.Fatal(err)
 		}
 		return

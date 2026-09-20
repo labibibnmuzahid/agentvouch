@@ -21,6 +21,8 @@ NESSIE_KEY="$(grep -E '^NESSIE_API_KEY=' .env 2>/dev/null | cut -d= -f2- || true
 [ -f certs/nessie.json ] && scp -q certs/nessie.json "$HOST:/etc/agentvouch/nessie.json"
 GEMINI_KEY="$(grep -E '^GEMINI_API_KEY=' .env 2>/dev/null | cut -d= -f2- || true)"
 [ -n "$GEMINI_KEY" ] && printf '%s' "$GEMINI_KEY" | ssh "$HOST" 'umask 077; cat > /etc/agentvouch/gemini.key'
+MONGO_URI="$(grep -E '^MONGODB_URI=' .env 2>/dev/null | cut -d= -f2- || true)"
+[ -n "$MONGO_URI" ] && printf '%s' "$MONGO_URI" | ssh "$HOST" 'umask 077; cat > /etc/agentvouch/mongo.uri'
 true
 scp -q bin/agentvouch deploy/agentvouch.service deploy/Caddyfile "$HOST:/tmp/"
 ssh "$HOST" bash -s <<'REMOTE'

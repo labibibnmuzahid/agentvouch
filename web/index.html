@@ -117,7 +117,7 @@
   <h2>Decisions</h2>
   <div class="grid" id="scenarios"></div>
 
-  <h2>Audit ledger — hash-chained, anchored on Solana</h2>
+  <h2>Audit ledger — hash-chained, anchored on Solana, replicated to MongoDB Atlas</h2>
   <div class="table-wrap">
     <table>
       <thead><tr><th>#</th><th>Event</th><th>Time (UTC)</th><th>Detail</th><th>Seal</th><th>Solana anchor</th></tr></thead>
@@ -126,9 +126,10 @@
   </div>
   <p class="integrity" id="integrity"></p>
   <div class="anchor" id="anchor"></div>
+  <div class="anchor" id="atlas"></div>
 
   <footer>
-    Identity and liveness verified live via the GoDaddy ANS SDK (DNS <code>_ans-badge</code> → transparency log) · payment via Capital One Nessie · tamper-evident ledger.
+    Identity and liveness verified live via the GoDaddy ANS SDK (DNS <code>_ans-badge</code> → transparency log) · payment via Capital One Nessie · tamper-evident ledger, replicated to MongoDB Atlas.
     Agent card: <a href="/.well-known/agent-card.json">agent-card.json</a> · trust card: <a href="/.well-known/ans/trust-card.json">trust-card.json</a> · A2A: <code>POST /</code> · MCP: <code>POST /mcp</code>
   </footer>
 </main>
@@ -271,6 +272,24 @@ function applyAnchors(anchors) {
   }
 }
 
+// renderAtlas reports the MongoDB Atlas replica, re-verified server-side by
+// recomputing every seal out of the database.
+function renderAtlas(a) {
+  const box = document.getElementById("atlas");
+  if (!a) { box.replaceChildren(); return; }
+  if (!a.entries) {
+    box.replaceChildren(el("p", "note", "MongoDB Atlas replica: " + a.state));
+    return;
+  }
+  const p = el("p", a.intact ? "tx" : "note");
+  p.textContent = "MongoDB Atlas replica (" + a.cluster + "/" + a.database + "): " +
+    a.entries.toLocaleString() + " entries, " + a.decisions.toLocaleString() + " decisions, " +
+    a.agents.toLocaleString() + " agents observed · " +
+    (a.intact ? "every seal recomputed from the database: chain intact" : "REPLICA DOES NOT VERIFY");
+  p.style.color = a.intact ? "" : "var(--bad)";
+  box.replaceChildren(p);
+}
+
 let anchorPoll = 0;
 async function pollAnchor(needed) {
   const mine = ++anchorPoll;
@@ -280,6 +299,7 @@ async function pollAnchor(needed) {
       const l = await getJSON("/api/ledger");
       if (mine !== anchorPoll) return;
       applyAnchors(l.anchors);
+      renderAtlas(l.atlas);
       if (renderAnchor(l.latestAnchor, l.anchorState, needed)) return;
     } catch (_) { return; }
   }
@@ -312,7 +332,7 @@ async function run() {
     integ.style.color = r.ledgerOK ? "var(--ok)" : "var(--bad)";
     const needed = r.ledger.length ? r.ledger[r.ledger.length - 1].index + 1 : 0;
     if (!renderAnchor(r.anchor, r.anchorState, needed)) pollAnchor(needed);
-    getJSON("/api/ledger").then(l => applyAnchors(l.anchors)).catch(() => {});
+    getJSON("/api/ledger").then(l => { applyAnchors(l.anchors); renderAtlas(l.atlas); }).catch(() => {});
   } catch (err) {
     document.getElementById("summary").textContent = "Could not run verification: " + err.message;
   } finally {

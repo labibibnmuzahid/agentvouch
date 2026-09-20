@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -32,6 +33,7 @@ type server struct {
 	cardSigs *ttlCache[signedCard]
 	ledger   *Ledger
 	anchorer *Anchorer
+	store    *Store
 	sol      *Solana
 	llm      *Gemini
 	rail     PaymentRail
@@ -103,6 +105,20 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 	}
 	go anchorer.Run(context.Background())
 	s.ledger, s.anchorer, s.sol = ledger, anchorer, sol
+
+	// MongoDB Atlas holds the durable, queryable replica. It is optional and
+	// never on the decision path: it connects in the background, and if it is
+	// unreachable the checks and the local chain carry on unchanged.
+	if store := newStore(); store == nil {
+		log.Printf("mongodb atlas: no MONGODB_URI, the ledger stays local")
+	} else {
+		go store.Run(context.Background())
+		store.MirrorLedger(ledger.All())
+		s.store, anchorer.store = store, store
+		for _, a := range anchorer.History(10) {
+			store.RecordAnchor(a)
+		}
+	}
 	s.initLLM()
 
 	page, _ := webFS.ReadFile("web/index.html")
@@ -151,6 +167,11 @@ func (s *server) run(ctx context.Context) Report {
 	rep := RunDemo(ctx, s.reg, s.buyer, s.supplier, s.ledger, s.rail)
 	s.anchorer.Kick()
 	rep.Anchor, rep.AnchorState = s.anchorer.Latest()
+	s.store.MirrorLedger(rep.Ledger)
+	s.store.RecordDecisions(newNonce()[:12], rep.Scenarios)
+	for _, sc := range rep.Scenarios {
+		s.store.ObserveAgent(strings.ToLower(sc.Evidence.FQDN), sc.Evidence.ANS)
+	}
 	s.lastMu.Lock()
 	s.last = &rep
 	s.lastMu.Unlock()
@@ -193,6 +214,20 @@ func (s *server) initLLM() {
 			}
 			return map[string]any{"note": "no decisions yet in this session; call run_scenarios"}, nil
 		})
+	if s.store != nil {
+		g.addTool("agent_history",
+			"Look up AgentVouch's own record of one hostname in MongoDB Atlas: what ANS said about it each time it was resolved (status, sealed certificate fingerprint, advisory Trust Index) and every payment it has been refused, with the reason and how often. Use it for questions about the past, or about whether an agent has changed.",
+			map[string]any{"type": "OBJECT", "required": []string{"host"}, "properties": map[string]any{
+				"host": map[string]any{"type": "STRING", "description": "agent hostname, e.g. supplier.agentvouch.us"},
+			}},
+			func(ctx context.Context, args map[string]any) (any, error) {
+				h, _ := args["host"].(string)
+				if h, ok := normalizeHost(h); ok {
+					return s.store.HostReport(ctx, h)
+				}
+				return nil, errors.New("not a public DNS hostname")
+			})
+	}
 	s.llm = g
 	log.Printf("gemini: enabled (%s)", g.model)
 }
@@ -275,13 +310,21 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	if s.sol != nil {
 		out["wallet"] = s.sol.Address()
 	}
+	if s.store != nil {
+		out["atlas"] = s.store.State(r.Context())
+		if top, err := s.store.Refusals(r.Context(), "", 5); err == nil {
+			out["atlasRefusals"] = top
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *server) vouch(ctx context.Context, host string) VouchResult {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return Vouch(ctx, s.reg, host)
+	res := Vouch(ctx, s.reg, host)
+	s.store.ObserveAgent(res.Host, res.ANS)
+	return res
 }
 
 // ansInfo is one of our agents' own transparency-log record, for the cards.

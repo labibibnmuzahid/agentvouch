@@ -112,6 +112,13 @@ func (l *Ledger) Head() (int, string) {
 	return len(l.entries), l.entries[len(l.entries)-1].Hash
 }
 
+// All returns the whole chain.
+func (l *Ledger) All() []Entry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]Entry(nil), l.entries...)
+}
+
 // Tail returns up to the last n entries.
 func (l *Ledger) Tail(n int) []Entry {
 	l.mu.Lock()

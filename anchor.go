@@ -34,6 +34,7 @@ func anchorMemo(entries int, head string) string {
 type Anchorer struct {
 	sol    *Solana
 	ledger *Ledger
+	store  *Store
 	kick   chan struct{}
 
 	mu      sync.Mutex
@@ -115,6 +116,7 @@ func (a *Anchorer) record(an Anchor) {
 		b, _ := json.Marshal(an)
 		a.file.Write(append(b, '\n'))
 	}
+	a.store.RecordAnchor(an)
 }
 
 func (a *Anchorer) Run(ctx context.Context) {
