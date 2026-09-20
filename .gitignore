@@ -15,3 +15,7 @@ SETUP.md
 .claude/
 /state/
 /agentvouch
+
+# submission copy and generated deck (not part of the build)
+SUBMISSION.md
+presentation.pptx
