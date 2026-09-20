@@ -1,4 +1,5 @@
 agentvouch.us, www.agentvouch.us, buyer.agentvouch.us, supplier.agentvouch.us {
 	encode gzip
+	header -Server
 	reverse_proxy 127.0.0.1:8080
 }

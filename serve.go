@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-//go:embed web/index.html
+//go:embed web/index.html web/app.css web/app.js
 var webFS embed.FS
 
 const mcpProtocolVersion = "2025-03-26"
@@ -126,9 +126,23 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		// The dashboard's script and stylesheet are served as their own files, so
+		// the policy can refuse inline script entirely rather than allowing it.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Write(page)
 	})
+	for _, asset := range []struct{ path, file, mime string }{
+		{"GET /app.css", "web/app.css", "text/css; charset=utf-8"},
+		{"GET /app.js", "web/app.js", "text/javascript; charset=utf-8"},
+	} {
+		body, _ := webFS.ReadFile(asset.file)
+		mime := asset.mime
+		mux.HandleFunc(asset.path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", mime)
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Write(body)
+		})
+	}
 	mux.Handle("POST /{$}", s.limited(s.handleA2A))
 	mux.Handle("GET /api/run", s.limited(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.run(r.Context()))
@@ -707,7 +721,7 @@ func rpcError(id json.RawMessage, code int, msg string) map[string]any {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Strict-Transport-Security", "max-age=31536000")
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
