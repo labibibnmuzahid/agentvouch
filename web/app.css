@@ -531,6 +531,8 @@ h2 {
 .ans dd { margin: 0; overflow-wrap: anywhere; }
 
 .mono { font-family: var(--mono); font-size: 12px; }
+.penalty { margin-top: 3px; font-size: 11.5px; color: var(--bad); }
+.penalty .mono { color: var(--bad); font-weight: 650; }
 .bad { color: var(--bad); }
 
 .copy {

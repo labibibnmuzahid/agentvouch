@@ -57,7 +57,7 @@ func Vouch(ctx context.Context, reg *Registry, host string) VouchResult {
 	out := reg.Resolve(ctx, cert)
 	res.ANS = ansEvidence(out.Badge)
 	if res.ANS != nil {
-		res.ANS.TrustScore = reg.TrustScore(ctx, host, res.ANS.DisplayName)
+		reg.Enrich(ctx, res.ANS)
 	}
 	switch out.Type {
 	case verify.OutcomeVerified:

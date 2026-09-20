@@ -27,6 +27,25 @@ const (
 type Registry struct {
 	v      *verify.ClientVerifier
 	scores *ttlCache[*int]
+	trust  *ttlCache[*TrustIndex]
+}
+
+// TrustIndex is GoDaddy's advisory score with the reasons behind it: the
+// per-pillar vector and every penalty the registry applied. It is advisory
+// only - a low score warns, a high score never authorizes - but showing WHY a
+// score is what it is beats showing a bare number.
+type TrustIndex struct {
+	Score     int            `json:"score"`
+	Base      int            `json:"base,omitempty"`
+	Pillars   map[string]int `json:"pillars,omitempty"`
+	Penalties []TrustPenalty `json:"penalties,omitempty"`
+}
+
+type TrustPenalty struct {
+	Signal  string `json:"signal"`
+	Outcome string `json:"outcome"`
+	Tier    string `json:"tier"`
+	Points  int    `json:"points"`
 }
 
 func NewRegistry() *Registry {
@@ -36,6 +55,7 @@ func NewRegistry() *Registry {
 			verify.WithCache(verify.NewBadgeCacheWithDefaults()),
 		),
 		scores: newTTLCache[*int](10 * time.Minute),
+		trust:  newTTLCache[*TrustIndex](10 * time.Minute),
 	}
 }
 
@@ -58,6 +78,73 @@ func (r *Registry) TrustScore(ctx context.Context, host, displayName string) *in
 	}
 	r.scores.put(host, score)
 	return score
+}
+
+// TrustDetail reads the registry's own explanation of an agent's Trust Index:
+// the pillar vector and the penalties it applied, by agent id. The endpoint is
+// public, so no key travels to the server for it.
+func (r *Registry) TrustDetail(ctx context.Context, agentID string) *TrustIndex {
+	if agentID == "" {
+		return nil
+	}
+	if t, ok := r.trust.get(agentID); ok {
+		return t
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, trustIndexURL+"/"+url.PathEscape(agentID), nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var body struct {
+		TrustScore  *float64           `json:"trustScore"`
+		TrustVector map[string]float64 `json:"trustVector"`
+		Explanation struct {
+			BaseTrustScore   *float64 `json:"baseTrustScore"`
+			AppliedPenalties []struct {
+				SignalName string   `json:"signalName"`
+				Outcome    string   `json:"outcome"`
+				Tier       string   `json:"tier"`
+				Points     *float64 `json:"points"`
+			} `json:"appliedPenalties"`
+		} `json:"trustScoreExplanation"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&body) != nil || body.TrustScore == nil {
+		r.trust.put(agentID, nil)
+		return nil
+	}
+	t := &TrustIndex{Score: int(*body.TrustScore), Pillars: map[string]int{}}
+	for k, v := range body.TrustVector {
+		t.Pillars[k] = int(v)
+	}
+	if body.Explanation.BaseTrustScore != nil {
+		t.Base = int(*body.Explanation.BaseTrustScore)
+	}
+	for _, p := range body.Explanation.AppliedPenalties {
+		pen := TrustPenalty{Signal: p.SignalName, Outcome: p.Outcome, Tier: p.Tier}
+		if p.Points != nil {
+			pen.Points = int(*p.Points)
+		}
+		t.Penalties = append(t.Penalties, pen)
+	}
+	r.trust.put(agentID, t)
+	return t
+}
+
+// Enrich fills in the advisory Trust Index for evidence we have already
+// sealed: the detailed record when the agent id resolves, and otherwise the
+// bare score from the registry search.
+func (r *Registry) Enrich(ctx context.Context, ev *ANSEvidence) {
+	if ev == nil {
+		return
+	}
+	if t := r.TrustDetail(ctx, ev.AgentID); t != nil {
+		score := t.Score
+		ev.Trust, ev.TrustScore = t, &score
+		return
+	}
+	ev.TrustScore = r.TrustScore(ctx, ev.HostName(), ev.DisplayName)
 }
 
 func (r *Registry) searchScore(ctx context.Context, query, host string) *int {
@@ -98,6 +185,18 @@ type ANSEvidence struct {
 	BadgeURL          string `json:"badgeUrl"`
 	DisplayName       string `json:"displayName"`
 	TrustScore        *int   `json:"trustScore,omitempty"`
+	// Trust carries the pillars and penalties behind the score, when the
+	// registry publishes them for this agent.
+	Trust *TrustIndex `json:"trust,omitempty"`
+}
+
+// HostName is the agent's hostname as the ANS name carries it.
+func (e *ANSEvidence) HostName() string {
+	name := strings.TrimPrefix(e.ANSName, "ans://")
+	if i := strings.Index(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func ansEvidence(b *models.Badge) *ANSEvidence {

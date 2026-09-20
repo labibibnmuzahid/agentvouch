@@ -92,7 +92,7 @@ func (b *Buyer) Authenticate(ctx context.Context, reg *Registry, peer Peer, q Qu
 	out := reg.Resolve(ctx, cert)
 	ev.ANS = ansEvidence(out.Badge)
 	if ev.ANS != nil {
-		ev.ANS.TrustScore = reg.TrustScore(ctx, fqdn, ev.ANS.DisplayName)
+		reg.Enrich(ctx, ev.ANS)
 	}
 	switch out.Type {
 	case verify.OutcomeVerified:

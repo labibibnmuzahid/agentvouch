@@ -71,8 +71,33 @@ function ansList(a, presented) {
   row("Sealed cert", copyable(a.sealedFingerprint, "mono", "SHA256:" + a.sealedFingerprint.slice(0, 16) + "…"));
   if (presented && presented !== a.sealedFingerprint)
     row("Presented cert", copyable(presented, "mono bad", "SHA256:" + presented.slice(0, 16) + "…"));
-  row("Trust Index", el("span", "mono", a.trustScore == null ? "not listed" : a.trustScore + " (advisory)"));
+  row("Trust Index", trustCell(a));
   return dl;
+}
+
+// trustCell shows the score with the registry's own reasons: the pillar vector
+// and every penalty it applied. The score is advisory and never authorizes, so
+// the reasons matter more than the number.
+function trustCell(a) {
+  const wrap = el("span");
+  if (a.trustScore == null && !a.trust) {
+    wrap.append(el("span", "mono", "not listed"));
+    return wrap;
+  }
+  const t = a.trust;
+  wrap.append(el("span", "mono", (t ? t.score : a.trustScore) + " (advisory)"));
+  if (!t) return wrap;
+  const pillars = Object.entries(t.pillars || {});
+  if (pillars.length) {
+    wrap.append(el("span", "note", " · " + pillars.map(([k, v]) => k + " " + v).join(", ")));
+  }
+  for (const p of t.penalties || []) {
+    const line = el("div", "penalty");
+    line.append(el("span", "mono", "−" + p.points), " " + p.signal + ": " + p.outcome.replace(/_/g, " ") + " (" + p.tier + ")");
+    wrap.append(line);
+  }
+  if (t.base) wrap.append(el("div", "note", "base " + t.base + ", after penalties " + t.score));
+  return wrap;
 }
 
 async function getJSON(url) {
