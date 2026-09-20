@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -53,12 +56,12 @@ func signAgentCard(a *Agent, jku string, card map[string]any) []map[string]any {
 }
 
 // verifyAgentCard checks that some signature on the card verifies under the
-// certificate's key.
+// certificate's key. Cards in the wild are signed with whatever key type the
+// agent's CA issued - ANS issues P-256 to us and RSA to the webmesh fleet - so
+// ES256, RS256 and EdDSA are all accepted. The key must still be the one sealed
+// in the transparency log: a signature made with a key an agent merely
+// publishes beside its card proves only that the document is self-consistent.
 func verifyAgentCard(card map[string]any, cert *x509.Certificate) bool {
-	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return false
-	}
 	var sigs []struct {
 		Protected string `json:"protected"`
 		Signature string `json:"signature"`
@@ -77,13 +80,34 @@ func verifyAgentCard(card map[string]any, cert *x509.Certificate) bool {
 			Alg string `json:"alg"`
 		}
 		raw, err := b64url.DecodeString(sg.Signature)
-		if json.Unmarshal(hdr, &h) != nil || h.Alg != "ES256" || err != nil || len(raw) != 64 {
+		if json.Unmarshal(hdr, &h) != nil || err != nil {
 			continue
 		}
-		sum := sha256.Sum256([]byte(sg.Protected + "." + payload))
-		if ecdsa.Verify(pub, sum[:], new(big.Int).SetBytes(raw[:32]), new(big.Int).SetBytes(raw[32:])) {
+		if verifySignature(cert.PublicKey, h.Alg, []byte(sg.Protected+"."+payload), raw) {
 			return true
 		}
+	}
+	return false
+}
+
+// verifySignature checks one JWS signature under the algorithm its header
+// names, refusing any pairing of algorithm and key the header did not claim.
+func verifySignature(pub any, alg string, signingInput, sig []byte) bool {
+	sum := sha256.Sum256(signingInput)
+	switch key := pub.(type) {
+	case *ecdsa.PublicKey:
+		if alg != "ES256" || len(sig) != 64 {
+			return false
+		}
+		return ecdsa.Verify(key, sum[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:]))
+	case *rsa.PublicKey:
+		if alg != "RS256" {
+			return false
+		}
+		return rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig) == nil
+	case ed25519.PublicKey:
+		// EdDSA signs the input itself; it does not take a pre-hash.
+		return alg == "EdDSA" && ed25519.Verify(key, signingInput, sig)
 	}
 	return false
 }
