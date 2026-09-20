@@ -16,13 +16,17 @@ for name in buyer supplier; do
   fi
 done
 [ -f certs/solana-devnet.json ] && scp -q certs/solana-devnet.json "$HOST:/etc/agentvouch/solana.json"
-NESSIE_KEY="$(grep -E '^NESSIE_API_KEY=' .env 2>/dev/null | cut -d= -f2- || true)"
-[ -n "$NESSIE_KEY" ] && printf '%s' "$NESSIE_KEY" | ssh "$HOST" 'umask 077; cat > /etc/agentvouch/nessie.key'
+# env_value reads one secret out of .env, tolerating CRLF and a key pasted twice.
+env_value() { grep -E "^$1=" .env 2>/dev/null | head -1 | sed -E "s/^($1=)+//" | tr -d '\r\n'; }
+ship_secret() {
+  value="$(env_value "$1")"
+  [ -n "$value" ] || return 0
+  printf '%s' "$value" | ssh "$HOST" "umask 077; cat > /etc/agentvouch/$2"
+}
+ship_secret NESSIE_API_KEY nessie.key
 [ -f certs/nessie.json ] && scp -q certs/nessie.json "$HOST:/etc/agentvouch/nessie.json"
-GEMINI_KEY="$(grep -E '^GEMINI_API_KEY=' .env 2>/dev/null | cut -d= -f2- || true)"
-[ -n "$GEMINI_KEY" ] && printf '%s' "$GEMINI_KEY" | ssh "$HOST" 'umask 077; cat > /etc/agentvouch/gemini.key'
-MONGO_URI="$(grep -E '^MONGODB_URI=' .env 2>/dev/null | cut -d= -f2- || true)"
-[ -n "$MONGO_URI" ] && printf '%s' "$MONGO_URI" | ssh "$HOST" 'umask 077; cat > /etc/agentvouch/mongo.uri'
+ship_secret GEMINI_API_KEY gemini.key
+ship_secret MONGODB_URI mongo.uri
 true
 scp -q bin/agentvouch deploy/agentvouch.service deploy/Caddyfile "$HOST:/tmp/"
 ssh "$HOST" bash -s <<'REMOTE'

@@ -147,7 +147,7 @@ func (s *Store) connect(ctx context.Context) error {
 	s.client, s.connected = client, true
 	s.ledger, s.decisions = db.Collection("ledger"), db.Collection("decisions")
 	s.agents, s.anchors = db.Collection("agents"), db.Collection("anchors")
-	s.state = "connected to " + mongoHost(s.uri)
+	s.state, s.lastErr = "connected to "+mongoHost(s.uri), ""
 	s.mu.Unlock()
 	s.ensureIndexes(ctx)
 	log.Printf("mongodb atlas: replicating to %s/%s", mongoHost(s.uri), mongoDatabase)
