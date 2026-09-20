@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,7 @@ const geminiSystemPrompt = `You are AgentVouch (ans://v1.0.0.buyer.agentvouch.us
 How you work:
 - Payment decisions are made by AgentVouch's verification code, never by you. You explain results. You cannot approve, authorize or send payments, and must never say or imply that you have.
 - Use your tools for every factual claim about an agent, a payment or the audit ledger. If no tool returned it, say you do not know.
+- Answer with as few tool calls as possible. For questions about what happened, use recent_decisions; reach for run_scenarios only when asked for a fresh run. Ask for every lookup you need in one turn rather than one at a time.
 - ANS proves identity and liveness only. A genuine, ACTIVE agent is not therefore honest or safe to pay.
 - The Trust Index is advisory. Report the number as given and say it is advisory. Never invent a scale, maximum or threshold for it, and never call a score high or low: AgentVouch does not decide by score.
 - When giving a verdict, cite the evidence: ANS name, status, transparency-log leaf, the first 12 hex characters of the sealed certificate fingerprint, the Trust Index, and for a blocked payment the exact failed check and its reason.
@@ -97,7 +99,7 @@ func (g *Gemini) Answer(ctx context.Context, user string) (string, []any, error)
 	}
 	contents := []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": user}}}}
 	var used []any
-	for round := 0; round < 5; round++ {
+	for round := 0; round < 3; round++ {
 		content, err := g.generate(ctx, contents)
 		if err != nil {
 			return "", used, err
@@ -109,23 +111,45 @@ func (g *Gemini) Answer(ctx context.Context, user string) (string, []any, error)
 			return "", used, err
 		}
 		var text strings.Builder
-		var calls []any
+		var wanted []geminiPart
 		for _, p := range c.Parts {
 			if p.FunctionCall == nil {
 				text.WriteString(p.Text)
 				continue
 			}
-			var out any
-			if t, ok := g.tools[p.FunctionCall.Name]; !ok {
-				out = map[string]any{"error": "unknown tool " + p.FunctionCall.Name}
-			} else if r, err := t.run(ctx, p.FunctionCall.Args); err != nil {
-				out = map[string]any{"error": err.Error()}
-			} else {
-				out = r
-				used = append(used, r)
+			wanted = append(wanted, p)
+		}
+		// A turn often asks for several lookups at once, and each one reaches ANS
+		// or the database, so run them together instead of one after another.
+		results := make([]any, len(wanted))
+		var wg sync.WaitGroup
+		for i, call := range wanted {
+			wg.Add(1)
+			go func(i int, call geminiPart) {
+				defer wg.Done()
+				t, ok := g.tools[call.FunctionCall.Name]
+				if !ok {
+					results[i] = map[string]any{"error": "unknown tool " + call.FunctionCall.Name}
+					return
+				}
+				tctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				r, err := t.run(tctx, call.FunctionCall.Args)
+				if err != nil {
+					results[i] = map[string]any{"error": err.Error()}
+					return
+				}
+				results[i] = r
+			}(i, call)
+		}
+		wg.Wait()
+		var calls []any
+		for i, p := range wanted {
+			if m, isMap := results[i].(map[string]any); !isMap || m["error"] == nil {
+				used = append(used, results[i])
 			}
 			calls = append(calls, map[string]any{"functionResponse": map[string]any{
-				"name": p.FunctionCall.Name, "response": map[string]any{"result": out},
+				"name": p.FunctionCall.Name, "response": map[string]any{"result": results[i]},
 			}})
 		}
 		if len(calls) == 0 {
@@ -149,7 +173,10 @@ func (g *Gemini) generate(ctx context.Context, contents []any) (json.RawMessage,
 		"systemInstruction": map[string]any{"parts": []any{map[string]any{"text": geminiSystemPrompt}}},
 		"contents":          contents,
 		"tools":             []any{map[string]any{"functionDeclarations": decls}},
-		"generationConfig":  map[string]any{"temperature": 0.2, "maxOutputTokens": 2048},
+		// Answers are short and every fact comes from a tool, so the model needs no
+		// thinking budget - switching it off roughly halves the time to first byte.
+		"generationConfig": map[string]any{"temperature": 0.2, "maxOutputTokens": 640,
+			"thinkingConfig": map[string]any{"thinkingBudget": 0}},
 	})
 	url := g.base + "/v1beta/models/" + g.model + ":generateContent"
 	// Gemini returns 503 when a model is briefly overloaded, so retry once.

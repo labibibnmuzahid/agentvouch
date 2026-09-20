@@ -30,6 +30,7 @@ type server struct {
 	fleet    Fleet
 	supplier *Agent
 	ans      *ttlCache[*ANSEvidence]
+	vouches  *ttlCache[VouchResult]
 	cardSigs *ttlCache[signedCard]
 	ledger   *Ledger
 	anchorer *Anchorer
@@ -40,6 +41,7 @@ type server struct {
 
 	lastMu sync.Mutex
 	last   *Report
+	lastAt time.Time
 
 	perIP  *limiter
 	global *limiter
@@ -76,6 +78,7 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 	s := &server{
 		host: *host, reg: reg, buyer: buyer, fleet: fleet, supplier: fleet.supplier(), rail: rail,
 		ans:      newTTLCache[*ANSEvidence](10 * time.Minute),
+		vouches:  newTTLCache[VouchResult](90 * time.Second),
 		cardSigs: newTTLCache[signedCard](time.Hour),
 		perIP:    newLimiter(1, 20),
 		global:   newLimiter(5, 20),
@@ -153,6 +156,32 @@ func serve(args []string, reg *Registry, buyer *Buyer, fleet Fleet, rail Payment
 	mux.Handle("POST /mcp", s.limited(s.handleMCP))
 	mux.HandleFunc("GET /api/ledger", s.handleLedger)
 	mux.Handle("POST /api/ask", s.limited(s.handleAsk))
+	// The dashboard's quote playground: the same two tools other agents call,
+	// so what a visitor sees is the real issue-then-verify path.
+	mux.Handle("POST /api/quote/issue", s.limited(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		var req struct {
+			Buyer     string `json:"buyer"`
+			AmountUSD int    `json:"amountUsd"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if strings.TrimSpace(req.Buyer) == "" {
+			req.Buyer = s.buyer.Name
+		}
+		sup := s.fleet.supplier()
+		writeJSON(w, http.StatusOK, s.issueQuote(persona{host: certHost(sup.Cert()), agent: sup, supplier: true}, req.Buyer, req.AmountUSD))
+	}))
+	mux.Handle("POST /api/quote/verify", s.limited(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		var req struct {
+			Quote json.RawMessage `json:"quote"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "send {\"quote\": {...}}"})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.verifyQuoteReport(r.Context(), req.Quote))
+	}))
 	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.signedAgentCard(r.Context(), s.personaFor(r)))
 	})
@@ -208,9 +237,22 @@ func (s *server) run(ctx context.Context) Report {
 		s.store.ObserveAgent(strings.ToLower(sc.Evidence.FQDN), sc.Evidence.ANS)
 	}
 	s.lastMu.Lock()
-	s.last = &rep
+	s.last, s.lastAt = &rep, time.Now()
 	s.lastMu.Unlock()
 	return rep
+}
+
+// runRecent answers with the last run while it is still fresh. A live run pays a
+// supplier and verifies ten scenarios against ANS, which takes seconds; a
+// question about what happened does not need that repeated.
+func (s *server) runRecent(ctx context.Context, maxAge time.Duration) Report {
+	s.lastMu.Lock()
+	last, at := s.last, s.lastAt
+	s.lastMu.Unlock()
+	if last != nil && time.Since(at) < maxAge {
+		return *last
+	}
+	return s.run(ctx)
 }
 
 func (s *server) lastRun() *Report {
@@ -237,9 +279,11 @@ func (s *server) initLLM() {
 			return s.vouch(ctx, h), nil
 		})
 	g.addTool("run_scenarios",
-		"Run the verify-then-pay demo live: one legitimate payment and eight attacks, each with the check that decided it.",
+		"Get the verify-then-pay results: one legitimate payment and nine attacks, each with the check that decided it. Returns the most recent run when it is less than two minutes old, and otherwise runs the scenarios again live.",
 		nil,
-		func(ctx context.Context, _ map[string]any) (any, error) { return summarize(s.run(ctx)), nil })
+		func(ctx context.Context, _ map[string]any) (any, error) {
+			return summarize(s.runRecent(ctx, 2*time.Minute)), nil
+		})
 	g.addTool("recent_decisions",
 		"Return the most recent verify-then-pay decisions with their evidence, plus the audit ledger's state and Solana anchor, without running anything new.",
 		nil,
@@ -354,10 +398,21 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// vouch verifies a host, reusing a recent verdict. One question can ask about
+// several agents at once, and each fresh verdict costs a DNS lookup, a trust
+// card fetch and a transparency-log read.
 func (s *server) vouch(ctx context.Context, host string) VouchResult {
+	if h, ok := normalizeHost(host); ok {
+		if res, hit := s.vouches.get(h); hit {
+			return res
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	res := Vouch(ctx, s.reg, host)
+	if res.Verdict != "" && res.Host != "" {
+		s.vouches.put(res.Host, res)
+	}
 	s.store.ObserveAgent(res.Host, res.ANS)
 	return res
 }
@@ -636,7 +691,9 @@ func (s *server) respond(ctx context.Context, p persona, text string) (string, a
 		if r := []rune(text); len(r) > 2000 {
 			text = string(r[:2000])
 		}
-		lctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		// A person is waiting, so the model gets a hard deadline. Past it, the
+		// rule-based answer is returned immediately rather than a spinner.
+		lctx, cancel := context.WithTimeout(ctx, 14*time.Second)
 		reply, used, err := s.llm.Answer(lctx, text)
 		cancel()
 		if err == nil {
