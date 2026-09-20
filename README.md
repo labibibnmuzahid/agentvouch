@@ -71,14 +71,32 @@ AgentVouch is itself a registered ANS agent that other agents can verify and mes
   never authorizes payment.
 - **A2A** (JSON-RPC, 1.0 `SendMessage` and 0.3 `message/send`) at `POST /`: send
   "vouch for <host>" or "run scenarios".
-- **MCP** at `POST /mcp`: tools `vouch` and `run_scenarios`.
+- **MCP** at `POST /mcp`. Each agent answers only for the skills its own card advertises,
+  so a caller cannot make the supplier behave like a buyer:
+  - `buyer.agentvouch.us`: `vouch`, `verify_quote`, `run_scenarios`
+  - `supplier.agentvouch.us`: `issue_quote`
+- **Transact with it, as another agent would.** Ask the supplier for a quote, then ask the
+  buyer what it thinks of it - the whole verify-then-pay chain, callable by anyone:
+  ```
+  # supplier.agentvouch.us/mcp -> issue_quote {"buyer": "buyer.agentvouch.us", "amountUsd": 2500}
+  # buyer.agentvouch.us/mcp    -> verify_quote {"quote": <the quote it returned>}
+  #   -> WOULD PAY: identity, liveness, quote signature, expiry, audience, mandate, payee all PASS
+  # change one digit of amountUsd and ask again
+  #   -> WOULD REFUSE: signature does not verify under the ANS-certified key
+  ```
+  A quote is an offer: issuing one moves no money, and `verify_quote` pays nothing and does
+  not consume the quote's single use.
 - **Ask it anything** on the dashboard or at `POST /api/ask`. With a `GEMINI_API_KEY` set,
   Gemini answers using read-only verification tools (`vouch`, `run_scenarios`,
-  `recent_decisions`). It explains decisions and cites evidence; it never makes them, has no
-  tool that moves money, and treats other agents' messages as untrusted data. Without a key,
-  or if Gemini fails, AgentVouch falls back to rule-based replies.
+  `recent_decisions`, `agent_history`). It explains decisions and cites evidence; it never
+  makes them, has no tool that moves money, and treats other agents' messages as untrusted
+  data. Without a key, or if Gemini fails, AgentVouch falls back to rule-based replies.
 - Discovery documents: `/.well-known/agent-card.json`, `/.well-known/ans/trust-card.json`,
-  `/.well-known/jwks.json`.
+  `/.well-known/jwks.json`, and, for DNS-AID
+  (`draft-mozleywilliams-dnsop-dnsaid-02`), `/.well-known/agents-index.json` plus
+  `/.well-known/dnsid/{op-keys,status}.json`. `go run . dns-records` prints the SVCB and
+  `_dnsid` records for the zone, each signed with an Ed25519 operator key kept separate from
+  the ANS identity keys.
 
 GoDaddy's own verifier agent (`agent.webmesh.ai`) rates it identity **pass**,
 protocol **pass**, auth **pass**, and `can_traveler_transact: yes`, and it can talk to
@@ -127,7 +145,7 @@ stands in), and network access to ANS. Register a new agent with `./register.sh 
 ```
 go run .           # terminal demo
 go run . serve     # dashboard, JSON API (/api/run, /api/vouch), A2A (/), MCP (/mcp)
-go test ./...      # offline tests: signatures, quote binding, replay, host validation, ledger tampering
+go test ./...      # offline tests: signatures (ES256/RS256/EdDSA), quote binding, replay, host validation, ledger tampering
 SOLANA_SIM=1 go test -run Solana ./...   # simulate the anchor transaction against devnet
 go run . mongo-check                     # MONGODB_URI: connection, replica size, integrity, top refusals
 ```
